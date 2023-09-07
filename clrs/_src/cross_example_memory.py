@@ -60,13 +60,14 @@ class MeanStdMemory(CrossExampleMemory):
     self._dim = dim
 
   def transform_features(self, node_fts: _Array) -> _Array:
-    means = hk.get_state("means", (self._size, self._dim), init=jnp.zeros())
-    stds = hk.get_state("stds", (self._size, self._dim), init=jnp.zeros())
+    size = (self._size, self._dim)
+    means = hk.get_state("means", size, init=jnp.zeros)
+    stds = hk.get_state("stds", size, init=jnp.zeros)
 
-    temp = hk.get_parameter("temp1", shape=[], init=jnp.zeros())
+    temp = hk.get_parameter("temp1", shape=[], init=jnp.zeros)
 
-    mean = jnp.mean(node_fts)
-    std = jnp.std(node_fts)
+    mean = jnp.mean(node_fts, axis=0)
+    std = jnp.std(node_fts, axis=0)
 
     # Compute distance of node_fts to everything in the data structure
     ds = jnp.linalg.norm(means - mean, axis=1) + jnp.linalg.norm(stds - std, axis=1)
@@ -76,12 +77,12 @@ class MeanStdMemory(CrossExampleMemory):
     w = jax.nn.softmax(s)
 
     # Goal mean/std are a linear combination of all items in data structure, weighted by w
-    mean_goal = w * means
-    std_goal = w * stds
+    mean_goal = jnp.sum(w[:, None] * means, axis=0)
+    std_goal = jnp.sum(w[:, None] * stds, axis=0)
 
     # Compute lerp factor; formulation 1
-    temp2 = hk.get_parameter("temp2", shape=[], init=jnp.zeros())
-    temp3 = hk.get_parameter("temp3", shape=[], init=jnp.zeros())
+    temp2 = hk.get_parameter("temp2", shape=[], init=jnp.zeros)
+    temp3 = hk.get_parameter("temp3", shape=[], init=jnp.zeros)
     lerp_factor = jax.nn.sigmoid(-jnp.exp(temp2) + jnp.exp(temp3) * jnp.sum(s))
 
     mean_final = lerp_factor * mean_goal + (1 - lerp_factor) * mean
@@ -92,12 +93,13 @@ class MeanStdMemory(CrossExampleMemory):
 
   def insert(self, node_fts: _Array):
     # Update new_means, new_stds and counter
-    new_means = hk.get_state("new_means", (self._size, self._dim), init=jnp.zeros())
-    new_stds = hk.get_state("new_stds", (self._size, self._dim), init=jnp.zeros())
-    counter = hk.get_state("counter", [], dtype=jnp.int32, init=jnp.zeros())
+    size = (self._size, self._dim)
+    new_means = hk.get_state("new_means", size, init=jnp.zeros)
+    new_stds = hk.get_state("new_stds", size, init=jnp.zeros)
+    counter = hk.get_state("counter", [], dtype=jnp.int32, init=jnp.zeros)
 
-    mean = jnp.mean(node_fts)
-    std = jnp.std(node_fts)
+    mean = jnp.mean(node_fts, axis=0)
+    std = jnp.std(node_fts, axis=0)
 
     new_means = new_means.at[counter, :].set(mean)
     new_stds = new_stds.at[counter, :].set(std)
@@ -108,8 +110,9 @@ class MeanStdMemory(CrossExampleMemory):
 
   def new_epoch(self):
     # Set means and stds to new_means and new_stds
-    new_means = hk.get_state("new_means", (self._size, self._dim), init=jnp.zeros())
-    new_stds = hk.get_state("new_stds", (self._size, self._dim), init=jnp.zeros())
+    size = (self._size, self._dim)
+    new_means = hk.get_state("new_means", size, init=jnp.zeros)
+    new_stds = hk.get_state("new_stds", size, init=jnp.zeros)
 
     hk.set_state("means", new_means)
     hk.set_state("stds", new_stds)
