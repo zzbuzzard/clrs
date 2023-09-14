@@ -81,7 +81,7 @@ class MeanStdMemory(CrossExampleMemory):
       ds = jnp.linalg.norm(means - mean, axis=1)
 
     # We are interested only in the closest N datapoints
-    N = 10
+    N = 50
     ds, inds_closest = jax.lax.top_k(-ds, N)  # simple workaround as jax.lax.min_k does not exist
     ds = -ds
 
@@ -118,50 +118,23 @@ class MeanStdMemory(CrossExampleMemory):
     return node_fts_transformed
 
   def insert(self, node_fts: _Array):
-    # Update new_means, new_stds and counter
-    size = (self._size, self._dim)
-    means = hk.get_state("means", size, init=jnp.zeros)
     counter = hk.get_state("counter", [], dtype=jnp.int32, init=jnp.zeros)
+    means = hk.get_state("means", (self._size, self._dim), init=jnp.zeros)
+    batch_means = jnp.mean(node_fts, axis=1)
 
-    if self._use_std:
-      stds = hk.get_state("stds", size, init=jnp.zeros)
+    n = node_fts.shape[0]
+    indices = (jnp.arange(n) + counter) % self._size
 
-    batch = node_fts.shape[0]
-
-    # batch_means = jnp.mean(node_fts, axis=1)
-    # batch_stds = jnp.std(node_fts, axis=1)
-    #
-    # if counter + batch <= self._size:
-    #   means = means.at[counter: counter + batch].set(batch_means)
-    #   stds = stds.at[counter: counter + batch].set(batch_stds)
-    # else:
-    #   # Wrap around
-    #   a = self._size - counter
-    #   b = batch - a
-    #   means = means.at[counter:].set(batch_means[:a])
-    #   stds = stds.at[counter:].set(batch_stds[:a])
-    #   means = means.at[:b].set(batch_means[a:])
-    #   stds = stds.at[:b].set(batch_stds[a:])
-    #
-    # counter = (counter + batch) % self._size
-
-    # TODO: vectorize as in PerNodeMemory
-    #  (this turned out to be more difficult than expected, as `counter` is a Traced object, but I found a way)
-    for i in range(batch):
-      mean = jnp.mean(node_fts[i], axis=0)
-      means = means.at[counter, :].set(mean)
-
-      if self._use_std:
-        std = jnp.std(node_fts[i], axis=0)
-        stds = stds.at[counter, :].set(std)
-
-      counter = (counter + 1) % self._size
-
+    means = means.at[indices].set(batch_means)
     hk.set_state("means", means)
-    hk.set_state("counter", counter)
 
     if self._use_std:
+      stds = hk.get_state("stds", (self._size, self._dim), init=jnp.zeros)
+      batch_stds = jnp.std(node_fts, axis=1)
+      stds = stds.at[indices].set(batch_stds)
       hk.set_state("stds", stds)
+
+    hk.set_state("counter", (counter + n) % self._size)
 
 
 class PerNodeMemory(CrossExampleMemory):
