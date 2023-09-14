@@ -24,6 +24,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from clrs._src.cross_example_memory import CrossExampleMemory, MeanStdMemory, PerNodeMemory
 
 _Array = chex.Array
 _Fn = Callable[..., Any]
@@ -671,13 +672,29 @@ class MemNetFull(MemNetMasked):
     return super().__call__(node_fts, edge_fts, graph_fts, adj_mat, hidden)
 
 
+class CrossExampleMemoryProcessor(Processor):
+  """Uses the decorator pattern to augment a Processor with a CrossExampleMemory."""
+  def __init__(self, processor: Processor, memory: CrossExampleMemory):
+    super().__init__("mem_" + processor.name)
+    self._processor = processor
+    self._memory = memory
+
+  def __call__(self, node_fts: _Array, edge_fts: _Array, graph_fts: _Array, adj_mat: _Array, hidden: _Array,
+               **kwargs) -> Tuple[_Array, Optional[_Array]]:
+    node_fts, edge_fts = self._processor(node_fts, edge_fts, graph_fts, adj_mat, hidden, **kwargs)
+    new_node_fts = self._memory.transform_features(node_fts)
+    self._memory.insert(node_fts)
+    return new_node_fts, edge_fts
+
+
 ProcessorFactory = Callable[[int], Processor]
 
 
 def get_processor_factory(kind: str,
                           use_ln: bool,
                           nb_triplet_fts: int,
-                          nb_heads: Optional[int] = None) -> ProcessorFactory:
+                          nb_heads: Optional[int] = None,
+                          cross_example_memory: bool = False) -> ProcessorFactory:
   """Returns a processor factory.
 
   Args:
@@ -685,6 +702,7 @@ def get_processor_factory(kind: str,
     use_ln: Whether the processor passes the output through a layernorm layer.
     nb_triplet_fts: How many triplet features to compute.
     nb_heads: Number of attention heads for GAT processors.
+    cross_example_memory: Whether to use a CrossExampleMemor
   Returns:
     A callable that takes an `out_size` parameter (equal to the hidden
     dimension of the network) and returns a processor instance.
@@ -838,6 +856,12 @@ def get_processor_factory(kind: str,
       )
     else:
       raise ValueError('Unexpected processor kind ' + kind)
+
+    if cross_example_memory:
+      # TODO: Make these arguments / cmd line params
+      # memory = MeanStdMemory(1000, out_size, use_std=False)
+      memory = PerNodeMemory(100, out_size)
+      return CrossExampleMemoryProcessor(processor, memory)
 
     return processor
 

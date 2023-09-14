@@ -118,6 +118,7 @@ flags.DEFINE_string('dataset_path', '/tmp/CLRS30',
                     'Path in which dataset is stored.')
 flags.DEFINE_boolean('freeze_processor', False,
                      'Whether to freeze the processor of the model.')
+flags.DEFINE_boolean('cross_example_memory', False, 'Whether to use a cross example memory module')
 
 FLAGS = flags.FLAGS
 
@@ -389,7 +390,8 @@ def main(unused_argv):
       FLAGS.processor_type,
       use_ln=FLAGS.use_ln,
       nb_triplet_fts=FLAGS.nb_triplet_fts,
-      nb_heads=FLAGS.nb_heads
+      nb_heads=FLAGS.nb_heads,
+      cross_example_memory=FLAGS.cross_example_memory
   )
   model_params = dict(
       processor_factory=processor_factory,
@@ -475,7 +477,11 @@ def main(unused_argv):
 
     # Periodically evaluate model
     if step >= next_eval:
+      if FLAGS.cross_example_memory:
+        rp = [i for i in eval_model.params.keys() if "clrs_memory" in i]
+        print("Final temperature:", [eval_model.params[i] for i in rp])
       eval_model.params = train_model.params
+      eval_model.state = train_model.state
       for algo_idx in range(len(train_samplers)):
         common_extras = {'examples_seen': current_train_items[algo_idx],
                          'step': step,
@@ -515,6 +521,10 @@ def main(unused_argv):
 
   logging.info('Restoring best model from checkpoint...')
   eval_model.restore_model('best.pkl', only_load_processor=False)
+
+  if FLAGS.cross_example_memory:
+    rp = [i for i in eval_model.params.keys() if "clrs_memory" in i]
+    print("Final temperature:", [eval_model.params[i] for i in rp])
 
   for algo_idx in range(len(train_samplers)):
     common_extras = {'examples_seen': current_train_items[algo_idx],
