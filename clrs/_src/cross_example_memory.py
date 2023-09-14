@@ -7,14 +7,19 @@ import chex
 import haiku as hk
 import jax
 import jax.numpy as jnp
+from jax import vmap
 
 _Array = chex.Array
+
+MEMORY_TAG = "_clrs_memory"
 
 
 class CrossExampleMemory(hk.Module):
   """Memory unit base class."""
 
   def __init__(self, name: str = 'memory'):
+    if not name.endswith(MEMORY_TAG):
+      name = name + MEMORY_TAG
     super().__init__(name=name)
 
   @abc.abstractmethod
@@ -40,79 +45,124 @@ class CrossExampleMemory(hk.Module):
     """
     raise NotImplementedError
 
-  @abc.abstractmethod
-  def new_epoch(self):
-    """
-    Alerts the data structure to the beginning of a new epoch.
-    """
-    raise NotImplementedError
-
 
 class MeanStdMemory(CrossExampleMemory):
-  def __init__(self, size: int, dim: int):
+  def __init__(self, size: int, dim: int, use_std: bool = True):
     """
     Args:
-      size: Number of entries to store (should equal epoch size)
-      dim: Dimensionality of entries (should equal node feature dimensionality)
+      size: Number of entries to store.
+      dim: Dimensionality of entries (should equal node feature dimensionality).
     """
-    super().__init__("mean_std_memory")
+    super().__init__("mean_std_clrs_memory")
     self._size = size
     self._dim = dim
+    self._use_std = use_std
+    self._vmap_transform_features = vmap(self._transform_features)
 
   def transform_features(self, node_fts: _Array) -> _Array:
+    return self._vmap_transform_features(node_fts)
+
+  def _transform_features(self, node_fts: _Array) -> _Array:
     size = (self._size, self._dim)
     means = hk.get_state("means", size, init=jnp.zeros)
-    stds = hk.get_state("stds", size, init=jnp.zeros)
+    if self._use_std:
+      stds = hk.get_state("stds", size, init=jnp.zeros)
 
-    temp = hk.get_parameter("temp1", shape=[], init=jnp.zeros)
+    temp = hk.get_parameter("temp1", shape=[], init=jnp.ones)
 
     mean = jnp.mean(node_fts, axis=0)
-    std = jnp.std(node_fts, axis=0)
+    if self._use_std:
+      std = jnp.std(node_fts, axis=0)
 
     # Compute distance of node_fts to everything in the data structure
-    ds = jnp.linalg.norm(means - mean, axis=1) + jnp.linalg.norm(stds - std, axis=1)
+    if self._use_std:
+      ds = jnp.linalg.norm(means - mean, axis=1) + jnp.linalg.norm(stds - std, axis=1)
+    else:
+      ds = jnp.linalg.norm(means - mean, axis=1)
+
+    # We are interested only in the closest N datapoints
+    N = 10
+    ds, inds_closest = jax.lax.top_k(-ds, N)  # simple workaround as jax.lax.min_k does not exist
+    ds = -ds
 
     # Compute strengths for each data structure item; a lower distance gives a higher strength
-    s = jnp.exp(temp) / jnp.square(ds)
+    # s = jnp.exp(temp) / jnp.square(ds)
+    s = jnp.exp(temp * -ds)
     w = jax.nn.softmax(s)
 
-    # Goal mean/std are a linear combination of all items in data structure, weighted by w
-    mean_goal = jnp.sum(w[:, None] * means, axis=0)
-    std_goal = jnp.sum(w[:, None] * stds, axis=0)
+    # Goal mean/std are a linear combination of top N items in data structure, weighted by w
+    means_closest = means[inds_closest]
+    mean_goal = jnp.sum(w[:, None] * means_closest, axis=0)
+    if self._use_std:
+      stds_closest = stds[inds_closest]
+      std_goal = jnp.sum(w[:, None] * stds_closest, axis=0)
 
     # Compute lerp factor; formulation 1
-    temp2 = hk.get_parameter("temp2", shape=[], init=jnp.zeros)
-    temp3 = hk.get_parameter("temp3", shape=[], init=jnp.zeros)
-    lerp_factor = jax.nn.sigmoid(-jnp.exp(temp2) + jnp.exp(temp3) * jnp.sum(s))
+    # temp2 = hk.get_parameter("temp2", shape=[], init=jnp.zeros)
+    # temp3 = hk.get_parameter("temp3", shape=[], init=jnp.zeros)
+    # lerp_factor = jax.nn.sigmoid(-jnp.exp(temp2) + jnp.exp(temp3) * jnp.mean(s))
+
+    # sigmoid(-1.0986122886681098) = 0.25
+    temp2 = hk.get_parameter("temp2", shape=(), init=hk.initializers.Constant(-1.0986122886681098))
+    lerp_factor = jax.nn.sigmoid(temp2)
 
     mean_final = lerp_factor * mean_goal + (1 - lerp_factor) * mean
-    std_final = lerp_factor * std_goal + (1 - lerp_factor) * std
+    if self._use_std:
+      std_final = lerp_factor * std_goal + (1 - lerp_factor) * std
 
-    node_fts_transformed = std_final * (node_fts - mean) / std + mean_final
+    if self._use_std:
+      node_fts_transformed = std_final * (node_fts - mean) / std + mean_final
+    else:
+      node_fts_transformed = node_fts - mean + mean_final
+
     return node_fts_transformed
 
   def insert(self, node_fts: _Array):
     # Update new_means, new_stds and counter
     size = (self._size, self._dim)
-    new_means = hk.get_state("new_means", size, init=jnp.zeros)
-    new_stds = hk.get_state("new_stds", size, init=jnp.zeros)
+    means = hk.get_state("means", size, init=jnp.zeros)
     counter = hk.get_state("counter", [], dtype=jnp.int32, init=jnp.zeros)
 
-    mean = jnp.mean(node_fts, axis=0)
-    std = jnp.std(node_fts, axis=0)
+    if self._use_std:
+      stds = hk.get_state("stds", size, init=jnp.zeros)
 
-    new_means = new_means.at[counter, :].set(mean)
-    new_stds = new_stds.at[counter, :].set(std)
+    batch = node_fts.shape[0]
 
-    hk.set_state("new_means", new_means)
-    hk.set_state("new_stds", new_stds)
-    hk.set_state("counter", counter + 1)
+    # batch_means = jnp.mean(node_fts, axis=1)
+    # batch_stds = jnp.std(node_fts, axis=1)
+    #
+    # if counter + batch <= self._size:
+    #   means = means.at[counter: counter + batch].set(batch_means)
+    #   stds = stds.at[counter: counter + batch].set(batch_stds)
+    # else:
+    #   # Wrap around
+    #   a = self._size - counter
+    #   b = batch - a
+    #   means = means.at[counter:].set(batch_means[:a])
+    #   stds = stds.at[counter:].set(batch_stds[:a])
+    #   means = means.at[:b].set(batch_means[a:])
+    #   stds = stds.at[:b].set(batch_stds[a:])
+    #
+    # counter = (counter + batch) % self._size
 
-  def new_epoch(self):
-    # Set means and stds to new_means and new_stds
-    size = (self._size, self._dim)
-    new_means = hk.get_state("new_means", size, init=jnp.zeros)
-    new_stds = hk.get_state("new_stds", size, init=jnp.zeros)
+    # TODO: vectorize as in PerNodeMemory
+    #  (this turned out to be more difficult than expected, as `counter` is a Traced object, but I found a way)
+    for i in range(batch):
+      mean = jnp.mean(node_fts[i], axis=0)
+      means = means.at[counter, :].set(mean)
+
+      if self._use_std:
+        std = jnp.std(node_fts[i], axis=0)
+        stds = stds.at[counter, :].set(std)
+
+      counter = (counter + 1) % self._size
+
+    hk.set_state("means", means)
+    hk.set_state("counter", counter)
+
+    if self._use_std:
+      hk.set_state("stds", stds)
+
 
     hk.set_state("means", new_means)
     hk.set_state("stds", new_stds)
