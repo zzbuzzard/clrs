@@ -164,6 +164,58 @@ class MeanStdMemory(CrossExampleMemory):
       hk.set_state("stds", stds)
 
 
-    hk.set_state("means", new_means)
-    hk.set_state("stds", new_stds)
-    hk.set_state("counter", 0)
+class PerNodeMemory(CrossExampleMemory):
+  def __init__(self, size: int, dim: int):
+    """
+    Args:
+      size: Number of entries to store.
+      dim: Dimensionality of entries (should equal node feature dimensionality).
+    """
+    super().__init__("per_node_clrs_memory")
+    self._size = size
+    self._dim = dim
+    self._vmap_transform_features = hk.vmap(hk.vmap(self._transform_feature, split_rng=False), split_rng=False)
+
+  def transform_features(self, node_fts: _Array) -> _Array:
+    return self._vmap_transform_features(node_fts)
+
+  def _transform_feature(self, node_ft: _Array) -> _Array:
+    """Transforms a single node feature."""
+    data = hk.get_state("data", (self._size, self._dim), init=jnp.zeros)
+    temp = hk.get_parameter("temp1", shape=[], init=jnp.ones)
+    ds = jnp.linalg.norm(data - node_ft, axis=1)
+    # We are interested only in the closest N datapoints
+    # N = 50
+    # ds, inds_closest = jax.lax.top_k(-ds, N)  # simple workaround as jax.lax.min_k does not exist
+    # ds = -ds
+
+    # Compute strengths for each data structure item; a lower distance gives a higher strength
+    # s = jnp.exp(temp) / jnp.square(ds)
+    s = jnp.exp(temp * -ds)
+    w = jax.nn.softmax(s)
+
+    # Goal mean/std are a linear combination of top N items in data structure, weighted by w
+    data_closest = data#[inds_closest]
+    data_goal = jnp.sum(w[:, None] * data_closest, axis=0)
+
+    # Compute lerp factor; alternative formulation
+    # temp2 = hk.get_parameter("temp2", shape=[], init=jnp.zeros)
+    # temp3 = hk.get_parameter("temp3", shape=[], init=jnp.zeros)
+    # lerp_factor = jax.nn.sigmoid(-jnp.exp(temp2) + jnp.exp(temp3) * jnp.mean(s))
+
+    # sigmoid(-1.0986122886681098) = 0.25
+    temp2 = hk.get_parameter("temp2", shape=(), init=hk.initializers.Constant(-1.0986122886681098))
+    lerp_factor = jax.nn.sigmoid(temp2)
+
+    return lerp_factor * data_goal + (1 - lerp_factor) * node_ft
+
+  def insert(self, node_fts: _Array):
+    data = hk.get_state("data", (self._size, self._dim), init=jnp.zeros)
+    counter = hk.get_state("counter", [], dtype=jnp.int32, init=jnp.zeros)
+
+    n = node_fts.shape[0] * node_fts.shape[1]
+    indices = (jnp.arange(n) + counter) % self._size
+    data = data.at[indices].set(node_fts.reshape((n, self._dim)))
+
+    hk.set_state("data", data)
+    hk.set_state("counter", (counter + n) % self._size)
