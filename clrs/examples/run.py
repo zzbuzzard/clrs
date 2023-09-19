@@ -391,7 +391,7 @@ def main(unused_argv):
       use_ln=FLAGS.use_ln,
       nb_triplet_fts=FLAGS.nb_triplet_fts,
       nb_heads=FLAGS.nb_heads,
-      cross_example_memory=FLAGS.cross_example_memory
+      cross_example_memory_spec=cross_example_memory_spec
   )
   model_params = dict(
       processor_factory=processor_factory,
@@ -477,9 +477,9 @@ def main(unused_argv):
 
     # Periodically evaluate model
     if step >= next_eval:
-      if FLAGS.cross_example_memory:
-        rp = [i for i in eval_model.params.keys() if "clrs_memory" in i]
-        print("Final temperature:", [eval_model.params[i] for i in rp])
+      # if FLAGS.cross_example_memory:
+      #   rp = [i for i in eval_model.params.keys() if "clrs_memory" in i if "linear" not in i]
+      #   print("Temperature:", [eval_model.params[i] for i in rp])
       eval_model.params = train_model.params
       eval_model.state = train_model.state
       for algo_idx in range(len(train_samplers)):
@@ -523,7 +523,7 @@ def main(unused_argv):
   eval_model.restore_model('best.pkl', only_load_processor=False)
 
   if FLAGS.cross_example_memory:
-    rp = [i for i in eval_model.params.keys() if "clrs_memory" in i]
+    rp = [i for i in eval_model.params.keys() if "clrs_memory" in i if "linear" not in i]
     print("Final temperature:", [eval_model.params[i] for i in rp])
 
   for algo_idx in range(len(train_samplers)):
@@ -544,4 +544,12 @@ def main(unused_argv):
 
 
 if __name__ == '__main__':
+  # TODO: Convert to command line args
+  cross_example_memory_spec = {
+    'size': 1000,
+    'kind': 'mean_std',
+    'use_std': False,
+    'lerp_mode': 'fixed',
+    'strength_mode': 'exponential'
+  }
   app.run(main)

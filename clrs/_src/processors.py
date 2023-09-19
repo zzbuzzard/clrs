@@ -24,7 +24,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from clrs._src.cross_example_memory import CrossExampleMemory, MeanStdMemory, PerNodeMemory
+from clrs._src.cross_example_memory import CrossExampleMemory, MeanStdMemory, PerNodeMemory, PerNodeROM
 
 _Array = chex.Array
 _Fn = Callable[..., Any]
@@ -677,13 +677,13 @@ class CrossExampleMemoryProcessor(Processor):
   def __init__(self, processor: Processor, memory: CrossExampleMemory):
     super().__init__("mem_" + processor.name)
     self._processor = processor
-    self._memory = memory
+    self.memory = memory
 
   def __call__(self, node_fts: _Array, edge_fts: _Array, graph_fts: _Array, adj_mat: _Array, hidden: _Array,
                **kwargs) -> Tuple[_Array, Optional[_Array]]:
     node_fts, edge_fts = self._processor(node_fts, edge_fts, graph_fts, adj_mat, hidden, **kwargs)
-    new_node_fts = self._memory.transform_features(node_fts)
-    self._memory.insert(node_fts)
+    new_node_fts = self.memory.transform_features(node_fts)
+    self.memory.insert(node_fts)
     return new_node_fts, edge_fts
 
 
@@ -694,7 +694,7 @@ def get_processor_factory(kind: str,
                           use_ln: bool,
                           nb_triplet_fts: int,
                           nb_heads: Optional[int] = None,
-                          cross_example_memory: bool = False) -> ProcessorFactory:
+                          cross_example_memory_spec: dict = None) -> ProcessorFactory:
   """Returns a processor factory.
 
   Args:
@@ -857,10 +857,16 @@ def get_processor_factory(kind: str,
     else:
       raise ValueError('Unexpected processor kind ' + kind)
 
-    if cross_example_memory:
-      # TODO: Make these arguments / cmd line params
-      # memory = MeanStdMemory(1000, out_size, use_std=False)
-      memory = PerNodeMemory(100, out_size)
+    if cross_example_memory_spec is not None:
+      mkind = cross_example_memory_spec['kind']
+      if mkind == 'mean_std':
+        memory = MeanStdMemory(dim=out_size, **cross_example_memory_spec)
+      elif mkind == 'per_node':
+        memory = PerNodeMemory(dim=out_size, **cross_example_memory_spec)
+      elif mkind == 'per_node_rom':
+        memory = PerNodeROM(dim=out_size, **cross_example_memory_spec)
+      else:
+        raise ValueError(f"Unexpected memory kind '{mkind}'")
       return CrossExampleMemoryProcessor(processor, memory)
 
     return processor
